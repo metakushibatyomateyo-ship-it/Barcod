@@ -253,6 +253,9 @@
   let results = [];
   let html5QrCode = null;
   let scanning = false;
+  // iOS releases the camera asynchronously.  Serializing transitions avoids
+  // a new start racing a previous stop and leaving a black preview behind.
+  let cameraBusy = false;
   let torchOn = false;
   let lastCode = null;
   let lastTime = 0;
@@ -343,10 +346,16 @@
 
   // ---- friendly Japanese error messages for getUserMedia failures ----
   function friendlyCameraError(err){
-    const name = err && err.name;
     if(!isSecureEnough()){
       return 'このページがHTTPSで開かれていないため、iPhoneのカメラを使用できません。';
     }
+    // html5-qrcode frequently rejects with a plain string rather than an
+    // Error/DOMException, so surface it as-is — it usually names the real
+    // underlying getUserMedia error, which we were previously swallowing.
+    if(typeof err === 'string' && err){
+      return err;
+    }
+    const name = err && err.name;
     switch(name){
       case 'NotAllowedError':
       case 'PermissionDeniedError':
@@ -363,7 +372,7 @@
       case 'SecurityError':
         return 'セキュリティ上の理由でカメラを起動できませんでした（HTTPS接続が必要です）。';
       default:
-        return (err && err.message) ? err.message : 'カメラを起動できませんでした（許可設定をご確認ください）';
+        return (err && err.message) ? `${err.message}${name ? ' ('+name+')' : ''}` : `カメラを起動できませんでした（${name || String(err) || '不明なエラー'}）`;
     }
   }
 
@@ -483,6 +492,8 @@
   // ---- start / stop ----
   async function startScanning(){
     if(!checkSecureContext()) return;
+    if(cameraBusy || scanning) return;
+    cameraBusy = true;
     toggleScanBtn.disabled = true;
     toggleScanBtn.textContent = '起動中…';
     try{
@@ -501,29 +512,15 @@
       }
       videoOff.style.display = 'none';
       lastCode = null;
-      const scanConfig = { fps:10, qrbox:qrboxFn, disableFlip:false };
-      try{
-        // Requesting a specific resolution alongside facingMode nudges iOS
-        // Safari away from picking the virtual multi-lens "back camera",
-        // which is a known source of a black/frozen preview on iPhone.
-        await html5QrCode.start(
-          { facingMode:'environment', width:{ ideal:1280 }, height:{ ideal:720 } },
-          scanConfig,
-          onScanSuccess,
-          onScanFailure
-        );
-      }catch(innerErr){
-        if(innerErr && innerErr.name === 'OverconstrainedError'){
-          await html5QrCode.start(
-            { facingMode:'environment' },
-            scanConfig,
-            onScanSuccess,
-            onScanFailure
-          );
-        } else {
-          throw innerErr;
-        }
-      }
+      // Do not request a fixed/ideal resolution here.  On some iPhones that
+      // combination powers the rear camera (and therefore the torch) but
+      // results in a black or frozen video preview.
+      await html5QrCode.start(
+        { facingMode:'environment' },
+        { fps:10, qrbox:qrboxFn, disableFlip:false },
+        onScanSuccess,
+        onScanFailure
+      );
       // Force iOS-friendly playback attributes/state in case the library's
       // own handling gets skipped in this WebKit version.
       const videoEl = readerEl.querySelector('video');
@@ -540,28 +537,45 @@
       toggleScanBtn.textContent = holdToggle.checked ? 'スキャン中（離すと停止）' : '停止';
       toggleScanBtn.classList.add('stop');
     }catch(err){
+      // Clean up a scanner created during a failed attempt before allowing a
+      // retry; otherwise Safari can retain a broken camera track.
+      if(html5QrCode){
+        try{ await html5QrCode.stop(); }catch(e){}
+        try{ html5QrCode.clear(); }catch(e){}
+        html5QrCode = null;
+      }
       videoOff.style.display = 'flex';
       videoOffText.textContent = friendlyCameraError(err);
+      updateIdleButtonLabel();
       toast('カメラの起動に失敗しました');
     }finally{
+      cameraBusy = false;
       toggleScanBtn.disabled = false;
     }
   }
 
   async function stopScanning(){
+    if(cameraBusy || !scanning) return;
+    cameraBusy = true;
     scanning = false;
+    toggleScanBtn.disabled = true;
     scanFrame.classList.remove('show');
-    if(html5QrCode){
-      try{ await html5QrCode.stop(); }catch(e){}
-      try{ html5QrCode.clear(); }catch(e){}
-      html5QrCode = null;
+    try{
+      if(html5QrCode){
+        try{ await html5QrCode.stop(); }catch(e){}
+        try{ html5QrCode.clear(); }catch(e){}
+        html5QrCode = null;
+      }
+    }finally{
+      videoOff.style.display = 'flex';
+      videoOffText.textContent = '「開始」を押してカメラを起動してください';
+      toggleScanBtn.textContent = holdToggle.checked ? '押している間スキャン' : '開始';
+      toggleScanBtn.classList.remove('stop');
+      torchBtn.hidden = true;
+      torchOn = false;
+      cameraBusy = false;
+      toggleScanBtn.disabled = false;
     }
-    videoOff.style.display = 'flex';
-    videoOffText.textContent = '「開始」を押してカメラを起動してください';
-    toggleScanBtn.textContent = holdToggle.checked ? '押している間スキャン' : '開始';
-    toggleScanBtn.classList.remove('stop');
-    torchBtn.hidden = true;
-    torchOn = false;
   }
 
   function updateIdleButtonLabel(){
