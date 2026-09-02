@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#101318">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>バーコードスキャナー</title>
+  <script src="https://unpkg.com/@zxing/browser@latest"></script>
+  <style>
+    :root{--bg:#101318;--panel:#1a1f27;--line:#303744;--text:#f1f4f8;--muted:#a8b0bd;--red:#ff4d43;--green:#36d985}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif}
+    main{max-width:620px;min-height:100dvh;margin:auto;display:flex;flex-direction:column} header{padding:calc(18px + env(safe-area-inset-top)) 18px 16px;border-bottom:1px solid var(--line)}
+    h1{font-size:20px;margin:0 0 4px} header p{margin:0;color:var(--muted);font-size:13px}.camera{position:relative;height:min(46vh,380px);min-height:250px;background:#000;overflow:hidden}
+    video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.shade{position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(0,0,0,.35),transparent 24%,transparent 76%,rgba(0,0,0,.35))}
+    .frame{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(76%,430px);height:92px;border:2px solid white;border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.14)}
+    .frame:before,.frame:after{content:"";position:absolute;width:22px;height:22px;border:4px solid var(--red)}.frame:before{top:-3px;left:-3px;border-right:0;border-bottom:0}.frame:after{right:-3px;bottom:-3px;border-left:0;border-top:0}
+    #message{position:absolute;z-index:3;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:30px;background:#000;color:var(--muted);font-size:14px}.camera.active #message{display:none}
+    .controls{display:flex;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}button{appearance:none;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--text);font:inherit;font-weight:700;padding:12px 14px;cursor:pointer}button:disabled{opacity:.45}.primary{flex:1;background:var(--red);border-color:var(--red);color:#210705}.primary.stop{background:var(--panel);color:var(--red)}#torch{width:50px;padding:0}.hint{margin:0;padding:10px 18px;color:var(--muted);font-size:13px;text-align:center}
+    .results{padding:8px 18px 18px;flex:1}.results-head{display:flex;align-items:center;justify-content:space-between}.results h2{font-size:15px}.link{background:none;border:0;color:var(--muted);padding:6px;text-decoration:underline;font-size:13px}.list{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}.empty{color:var(--muted);text-align:center;padding:28px 12px;font-size:14px}.row{display:grid;grid-template-columns:1fr auto;gap:10px;padding:12px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;word-break:break-all}.meta{font-size:12px;color:var(--muted);margin-top:4px}.export{margin:0 18px calc(18px + env(safe-area-inset-bottom));width:calc(100% - 36px)}
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>バーコードスキャナー</h1><p>連続読み取り・CSV出力</p></header>
+  <section class="camera" id="camera"><video id="preview" autoplay muted playsinline webkit-playsinline></video><div class="shade"></div><div class="frame"></div><div id="message">「開始」を押してカメラを起動してください</div></section>
+  <p class="hint" id="hint">バーコードを白い枠に横向きで収めてください</p>
+  <div class="controls"><button class="primary" id="start">開始</button><button id="torch" hidden aria-label="ライト">💡</button></div>
+  <section class="results"><div class="results-head"><h2>読み取り結果 <span id="count">0</span>件</h2><button class="link" id="clear">全て消去</button></div><div class="list" id="list"><div class="empty">まだ読み取り結果はありません</div></div></section>
+  <button class="export" id="export" disabled>CSVをダウンロード（0件）</button>
+</main>
+<script>
+(() => {
+  'use strict';
+  const preview=document.querySelector('#preview'), camera=document.querySelector('#camera'), message=document.querySelector('#message'), hint=document.querySelector('#hint');
+  const start=document.querySelector('#start'), torch=document.querySelector('#torch'), list=document.querySelector('#list'), count=document.querySelector('#count'), clear=document.querySelector('#clear'), exportButton=document.querySelector('#export');
+  let reader=null, controls=null, busy=false, torchOn=false, records=[], lastValue='', lastAt=0;
+  const labels={EAN_13:'EAN-13',EAN_8:'EAN-8',UPC_A:'UPC-A',UPC_E:'UPC-E',CODE_128:'CODE128',CODE_39:'CODE39',CODE_93:'CODE93',CODABAR:'CODABAR',ITF:'ITF',QR_CODE:'QRコード',DATA_MATRIX:'データマトリックス',PDF_417:'PDF417',AZTEC:'Aztec'};
+  const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const time=d=>d.toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  function render(){count.textContent=records.length;exportButton.disabled=!records.length;exportButton.textContent=`CSVをダウンロード（${records.length}件）`;list.innerHTML=records.length?records.map(r=>`<div class="row"><div><div class="code">${esc(r.value)}</div><div class="meta">${esc(r.format)} ・ ${time(r.at)}</div></div><button class="link" data-id="${r.id}">削除</button></div>`).join(''):'<div class="empty">まだ読み取り結果はありません</div>'}
+  function addResult(result){const value=result.getText();const now=Date.now();if(!value||(value===lastValue&&now-lastAt<1200))return;lastValue=value;lastAt=now;const raw=result.getBarcodeFormat();const format=(ZXingBrowser.BarcodeFormat&&ZXingBrowser.BarcodeFormat[raw])||String(raw);records.unshift({id:now+'-'+Math.random(),value,format:labels[format]||format,at:new Date()});navigator.vibrate&&navigator.vibrate(60);render();hint.textContent='読み取りました。続けて別のバーコードを読み取れます。'}
+  function friendly(error){const n=error&&error.name;if(!window.isSecureContext)return 'HTTPSのURLから開いてください';if(n==='NotAllowedError')return 'カメラの許可が必要です。Safariのサイト設定を確認してください。';if(n==='NotFoundError')return '利用できるカメラが見つかりません。';return 'カメラを起動できませんでした。ページを開き直して再試行してください。'}
+  function setupTorch(){const stream=preview.srcObject,track=stream&&stream.getVideoTracks()[0],caps=track&&track.getCapabilities&&track.getCapabilities();torch.hidden=!(caps&&caps.torch);torch.onclick=async()=>{torchOn=!torchOn;try{await track.applyConstraints({advanced:[{torch:torchOn}]});torch.style.color=torchOn?'#ffdf55':''}catch(e){torchOn=!torchOn}}}
+  async function begin(){if(busy||controls)return;if(!window.isSecureContext){message.textContent='HTTPSのURLから開いてください';return}if(!window.ZXingBrowser){message.textContent='読み取りライブラリを読み込めませんでした。通信を確認して開き直してください。';return}busy=true;start.disabled=true;start.textContent='起動中…';try{reader=new ZXingBrowser.BrowserMultiFormatReader();reader.timeBetweenDecodingAttempts=100;controls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'}},audio:false},preview,(result)=>{if(result)addResult(result)});camera.classList.add('active');start.textContent='停止';start.classList.add('stop');hint.textContent='明るい場所で、バーコードを白い枠に収めてください';setupTorch()}catch(error){message.textContent=friendly(error);controls=null;reader=null}finally{busy=false;start.disabled=false}}
+  async function end(){if(busy||!controls)return;busy=true;start.disabled=true;try{controls.stop()}catch(e){}controls=null;reader=null;preview.pause();preview.srcObject=null;camera.classList.remove('active');torch.hidden=true;torchOn=false;start.textContent='開始';start.classList.remove('stop');hint.textContent='バーコードを白い枠に横向きで収めてください'}finally{busy=false;start.disabled=false}}
+  start.addEventListener('click',()=>controls?end():begin());clear.addEventListener('click',()=>{records=[];render()});list.addEventListener('click',e=>{const id=e.target.dataset.id;if(id){records=records.filter(r=>r.id!==id);render()}});exportButton.addEventListener('click',()=>{const rows=[['コード内容','形式','日時'],...records.slice().reverse().map(r=>[r.value,r.format,r.at.toLocaleString('ja-JP')])];const csv=rows.map(row=>row.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\r\n');const url=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv'}));const a=document.createElement('a');a.href=url;a.download='barcode.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)});document.addEventListener('visibilitychange',()=>{if(document.hidden)end()});render();
+})();
+</script>
+</body>
+</html>
