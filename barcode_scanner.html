@@ -59,7 +59,15 @@
   #reader video{
     object-fit:cover !important; width:100% !important; height:100% !important;
     position:absolute !important; top:0 !important; left:0 !important;
+    /* The library continues to read this video. On some iPhones Safari paints
+       it black, so the visible preview is drawn to #cameraPreview instead. */
+    opacity:0;
   }
+  #cameraPreview{
+    position:absolute; inset:0; z-index:3; width:100%; height:100%;
+    display:none; background:#000;
+  }
+  #cameraPreview.show{ display:block; }
   #reader img{ display:none !important; } /* hide default camera-permission icon graphic */
   /* the library's own built-in scan-region overlay doesn't line up once we force
      the video to fill the container above, so we hide it and draw our own frame */
@@ -189,6 +197,7 @@
 
   <div class="scanner-view" id="scannerView">
     <div id="reader"></div>
+    <canvas id="cameraPreview" aria-hidden="true"></canvas>
     <div class="scan-frame" id="scanFrame"></div>
     <div class="video-off" id="videoOff">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h4l2-2h6l2 2h4v12H3z"/><circle cx="12" cy="13" r="3.5"/></svg>
@@ -241,6 +250,7 @@
   const scanFrame = document.getElementById('scanFrame');
   const insecureBanner = document.getElementById('insecureBanner');
   const readerEl = document.getElementById('reader');
+  const previewCanvas = document.getElementById('cameraPreview');
   const tbody = document.getElementById('tbody');
   const emptyState = document.getElementById('emptyState');
   const countBadge = document.getElementById('count-badge');
@@ -256,6 +266,7 @@
   // iOS releases the camera asynchronously.  Serializing transitions avoids
   // a new start racing a previous stop and leaving a black preview behind.
   let cameraBusy = false;
+  let previewFrameId = null;
   let torchOn = false;
   let lastCode = null;
   let lastTime = 0;
@@ -309,6 +320,48 @@
     const w = Math.max(160, Math.min(260, Math.floor(viewfinderWidth * 0.62)));
     const h = Math.max(50, Math.min(90, Math.floor(w / 3.1), Math.floor(viewfinderHeight * 0.22)));
     return { width: w, height: h };
+  }
+
+  // html5-qrcode can successfully decode frames on iPhone Safari while its
+  // own <video> element is rendered as a black rectangle. Drawing those same
+  // frames to a separate canvas avoids that WebKit display bug.
+  function startCameraPreview(sourceVideo){
+    stopCameraPreview();
+    const ctx = previewCanvas.getContext('2d');
+    previewCanvas.classList.add('show');
+    const draw = ()=>{
+      const rect = previewCanvas.getBoundingClientRect();
+      const sourceWidth = sourceVideo.videoWidth;
+      const sourceHeight = sourceVideo.videoHeight;
+      if(rect.width && rect.height && sourceWidth && sourceHeight){
+        const scale = window.devicePixelRatio || 1;
+        const targetWidth = Math.round(rect.width * scale);
+        const targetHeight = Math.round(rect.height * scale);
+        if(previewCanvas.width !== targetWidth || previewCanvas.height !== targetHeight){
+          previewCanvas.width = targetWidth;
+          previewCanvas.height = targetHeight;
+        }
+        const sourceRatio = sourceWidth / sourceHeight;
+        const targetRatio = targetWidth / targetHeight;
+        let sx = 0, sy = 0, sw = sourceWidth, sh = sourceHeight;
+        if(sourceRatio > targetRatio){
+          sw = sourceHeight * targetRatio;
+          sx = (sourceWidth - sw) / 2;
+        }else{
+          sh = sourceWidth / targetRatio;
+          sy = (sourceHeight - sh) / 2;
+        }
+        ctx.drawImage(sourceVideo, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+      }
+      previewFrameId = requestAnimationFrame(draw);
+    };
+    previewFrameId = requestAnimationFrame(draw);
+  }
+  function stopCameraPreview(){
+    if(previewFrameId !== null){ cancelAnimationFrame(previewFrameId); previewFrameId = null; }
+    previewCanvas.classList.remove('show');
+    const ctx = previewCanvas.getContext('2d');
+    ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   }
 
   // ---- custom scan-frame overlay (kept in sync with the qrbox size) ----
@@ -529,6 +582,7 @@
         videoEl.setAttribute('webkit-playsinline', 'true');
         videoEl.muted = true;
         videoEl.play().catch(()=>{});
+        startCameraPreview(videoEl);
       }
       scanning = true;
       setupTorch();
@@ -544,6 +598,7 @@
         try{ html5QrCode.clear(); }catch(e){}
         html5QrCode = null;
       }
+      stopCameraPreview();
       videoOff.style.display = 'flex';
       videoOffText.textContent = friendlyCameraError(err);
       updateIdleButtonLabel();
@@ -567,6 +622,7 @@
         html5QrCode = null;
       }
     }finally{
+      stopCameraPreview();
       videoOff.style.display = 'flex';
       videoOffText.textContent = '「開始」を押してカメラを起動してください';
       toggleScanBtn.textContent = holdToggle.checked ? '押している間スキャン' : '開始';
